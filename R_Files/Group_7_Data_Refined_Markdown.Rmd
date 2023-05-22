@@ -1,0 +1,257 @@
+---
+title: "Untitled"
+author: "Alden Jettpace"
+date: '2023-04-20'
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+#Opening Data
+Here I open the data of the original raw rail-data, and the cleaned and version with our selected attributes from the file [Project_DataClean_1]. Or **Rail_Equipment_Accident_Incident_Data.csv** and **cleaned_train_data_1.csv** respectivly.
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(reshape2)
+library(ggplot2)
+
+
+rail_data_raw <- read.csv("E:\\CloudComputingProject\\Data\\Rail_Equipment_Accident_Incident_Data.csv", header=TRUE, stringsAsFactors=FALSE)
+rail_data_clean = read.csv('C:\\Users\\alden\\Documents\\GRAD_SPRING_2023\\Analytics\\Project\\cleaned_train_data_1.csv', 
+                           header = TRUE, stringsAsFactors = TRUE)
+```
+
+We will now see any factors that might have less categories in their cleaned state than compared to the raw-data, since it creates the factors from the saved character options of the csv-file
+
+```{r}
+rail_data_raw = separate(rail_data_raw, 'Date', c('Month', 'Day', 'Year'), sep='/')
+rail_data_raw$Year = as.integer(rail_data_raw$Year)
+rail_data_raw$DayHour = hour(parse_date_time(rail_data_raw$Time, '%I:%M %p'))
+rail_data_raw$DayHour = as.character(rail_data_raw$DayHour)
+rail_data_raw = rail_data_raw[between(rail_data_raw$Latitude, 25.84, 49.38),]
+rail_data_raw = rail_data_raw[between(rail_data_raw$Longitude, -124.77, -66.95),]
+
+rail_data_clean$Year = as.integer(rail_data_clean$Year)
+
+appliable_pre = c('Month', 'Year', 'DayHour', 'Temperature', 'Visibility', 'Weather.Condition', 'Track.Type', 'Track.Class' , 'Track.Density','Train.Direction', 'Train.Speed', 'Recorded.Estimated.Speed', 'Maximum.Speed', 'Gross.Tonnage','Signalization', 'Method.of.Operation', 'Positive.Alcohol.Tests', 'Positive.Drug.Tests', 'Passengers.Transported','Hazmat.Cars', 'Head.End.Locomotives', 'Mid.Train.Manual.Locomotives', 'Mid.Train.Remote.Locomotives','Rear.End.Manual.Locomotives','Rear.End.Remote.Locomotives','Loaded.Freight.Cars','Loaded.Passenger.Cars','Empty.Freight.Cars','Empty.Passenger.Cars', 'Cabooses', 'Engineers.On.Duty', 'Firemen.On.Duty', 'Brakemen.On.Duty','Conductors.On.Duty', 'Hours.Engineers.On.Duty', 'Hours.Conductors.On.Duty', 'Minutes.Engineers.On.Duty',
+'Minutes.Conductors.On.Duty', 'Latitude', 'Longitude', 'Joint.Track.Class', 'Class.Code', 'Reporting.Railroad.Class', 'Reporting.Railroad.SMT.Grouping')
+
+possible_responses = c('Accident.Type', 'Equipment.Type', 'Equipment.Damage.Cost', 'Track.Damage.Cost', 'Total.Damage.Cost')
+
+damage_cost_data = rail_data_raw[,c(appliable_pre, 'Equipment.Damage.Cost', 'Track.Damage.Cost', 'Total.Damage.Cost')]
+
+length(names(rail_data_clean))
+drop <- c("Positive.Alcohol.Tests","Positive.Drug.Tests", 'Equipment.Damage.Cost', 'Track.Damage.Cost', 'Total.Damage.Cost')
+rail_data_clean = rail_data_clean[,!(names(rail_data_clean) %in% drop)]
+rail_data_clean$DayHour = as.factor(rail_data_clean$DayHour)
+length(names(rail_data_clean))
+names(rail_data_clean)
+```
+
+We can see that we have *44* attributes, though many are composed of multiple classes, including DayHour which is a 24-class-factor. We will now examine our factors which we share with the raw data to see any classes within these factors which are missing because of the cleaning
+
+```{r}
+shared_chars = intersect(names(damage_cost_data), names(rail_data_clean))
+for (i in shared_chars){
+  if(class(rail_data_clean[,i]) == 'factor'){
+    print(i)
+    print(setdiff(unique(damage_cost_data[,i]), unique(rail_data_clean[,i])))
+    cat('\n')
+  }
+}
+```
+
+As we can see, we lose several track classes, joint-track classes, and Class-Codes. Here I will show the specific names of the cateogrical and non-categorical factors
+
+```{r}
+fact_names = c()
+non_fact_names = c()
+for (i in names(rail_data_clean)){
+  if(class(rail_data_clean[,i]) == 'factor'){
+    fact_names = c(fact_names, i)
+  } else {
+    non_fact_names = c(non_fact_names, i)
+  }
+}
+print('Categorical Variables:')
+fact_names
+cat('\n')
+print('Countinous Variables:')
+non_fact_names
+```
+
+# Viewing Distribution of Factor-Anova-Score, and the factors themselves
+
+Here I will create a basis to predict which variable might or might not have correlation with the response-variable of summed-cost. This is done by using the anova-score of the factor on summed-cost in order to see if there is any significant difference in mean between the categories.
+
+```{r}
+anova_scores = c()
+for(fn in fact_names){
+  res.aov = aov(rail_data_clean$summed_cost ~ rail_data_clean[, fn])
+  x = summary(res.aov)
+  anova_scores = c(anova_scores, x[[1]][5][1,1])
+  if(x[[1]][5][1,1] < 0.1){
+    cat(fn, ' : ', x[[1]][5][1,1], '\n')
+  }
+}
+barplot(anova_scores, names.arg =  fact_names, las=2, ylab = 'P(>F)', main='Anova Scores for Summed_Cost')
+```
+
+As we can see, the only categoricals which have an insignificant ANOVA score are DayHour, Visibility, Weather Conditions, Passangers.Transported, and Positive.DA.Tests (positive Drug or Alcohol). However, this score might be lowered by finding specific categories of contention. If certain variables are not represented in significant numbers, it could alter our predictions.
+
+```{r}
+for(fn in fact_names){
+  barplot(table(rail_data_clean[, fn]), main=fn, las=2)
+}
+```
+
+
+# Chisq to predict posisble interactions which might be reduced away in the subset selection
+
+```{r}
+factor_combos = combn(fact_names, 2)
+warnings = 0
+for(i in 1:dim(factor_combos)[2]){
+  z = chisq.test(rail_data_clean[,factor_combos[1,i]], rail_data_clean[,factor_combos[2,i]])
+  if(z$p.value < 0.05){
+    cat(factor_combos[1,i], ' : ', factor_combos[2,i], ' : ', '\n', z$p.value, '\n')
+    warnings = warnings + 1
+  }
+}
+warnings
+```
+
+Overall: 69 out of 105
+
+# Plotting intial clean-data cnts-variable correlation
+
+```{r}
+cor_df <- round(cor(rail_data_clean[,non_fact_names]), 3)
+#melt the data frame
+melted_cor <- melt(cor_df)
+
+ggplot(data = melted_cor, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red",
+                       limit = c(-1,1), name="Correlation") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.background = element_blank())
+```
+
+Overall, we see that the most relevent variables to summed cost (top-layer) are Maximum-speed, train.speed, gross.tonnage, hazmat.cars, rear.end.locomotives, and loaded.freight.cars. However, loaded.freight.cars is related to gross.tonnage, and maximum-speed highly correlated with train.speed.
+
+# Changes to cleaned data
+
+Certain countinous variables might have different behaviour after a certain cutoff point, such as workers ability after a certain amount of time on shift. We could also fuse categories with similar behavour into larger groups to give the new larger group better representation in the data. The following changes will be made:
+1) Hours and Time on duty for workers and engineers will be turned to whether any worker (either engineer or conductor) has been on shift for over 8-hours.
+2) Turn months into the seasons of **Winter, Spring, Summer, Fall**
+3) Turn weather.conditions into the new categories: Clear, Cloud/Rain, Adverse [combination of Fog, Sleet, and Snow]
+3) For visibility, combine dusk into day, and dawn into dark.
+
+```{r}
+#Open a new clean-data, not as factors
+rail_data_c2 = rail_data_clean = read.csv('C:\\Users\\alden\\Documents\\GRAD_SPRING_2023\\Analytics\\Project\\cleaned_train_data_1.csv', 
+                                          header = TRUE, stringsAsFactors = FALSE)
+rail_data_c2$DayHour = as.character(rail_data_c2$DayHour)
+#Combine hours and minues
+rail_data_c2$Time.Engineers.On.Duty = (60*rail_data_c2$Hours.Engineers.On.Duty + rail_data_c2$Minutes.Engineers.On.Duty)
+rail_data_c2$Time.Conductors.On.Duty = (60*rail_data_c2$Hours.Conductors.On.Duty + rail_data_c2$Minutes.Conductors.On.Duty)
+#Variable for if both workers are over 7-hours on shift
+rail_data_c2$Working.Over.8 = ifelse((rail_data_c2$Time.Conductors.On.Duty >510) & (rail_data_c2$Time.Engineers.On.Duty > 510), 
+                                     'Yes', 'No')
+
+#Change months into season
+rail_data_c2$Season = 'Winter'
+rail_data_c2$Season[rail_data_c2$Month %in% c(4,5,6)] = 'Spring'
+rail_data_c2$Season[rail_data_c2$Month %in% c(7,8,9)] = 'Summer'
+rail_data_c2$Season[rail_data_c2$Month %in% c(10,11,12)] = 'Fall'
+
+#Drop now unused variables
+drop <- c("Positive.Alcohol.Tests","Positive.Drug.Tests", 'Equipment.Damage.Cost', 'Track.Damage.Cost', 'Total.Damage.Cost',
+          'Hours.Engineers.On.Duty', 'Minutes.Engineers.On.Duty', 'Hours.Conductors.On.Duty', 'Minutes.Conductors.On.Duty',
+          'Time.Engineers.On.Duty', 'Time.Conductors.On.Duty', 'Month')
+rail_data_c2 = rail_data_c2[,!(names(rail_data_c2) %in% drop)]
+names(rail_data_c2)
+
+#Wrangle Visibilities + Weather.Conditions (try for 2 vs 3)
+rail_data_c2$Weather.Condition[rail_data_c2$Weather.Condition !='Clear'] = 'Un-Clear'
+rail_data_c2$Visibility[rail_data_c2$Visibility == 'Dusk'] = 'Day'
+rail_data_c2$Visibility[rail_data_c2$Visibility == 'Dawn'] = 'Dark'
+```
+
+Now we will see the results of this change, by seeing the new anova scores and interaction effects via chisq-p-value.
+
+```{r}
+fact_names = c()
+non_fact_names = c()
+for (i in names(rail_data_c2)){
+  if(typeof(rail_data_c2[,i]) == 'character'){
+    rail_data_c2[,i] = as.factor(rail_data_c2[,i])
+    fact_names = c(fact_names, i)
+  } else {
+    non_fact_names = c(non_fact_names, i)
+  }
+}
+fact_names
+non_fact_names
+
+anova_scores = c()
+for(fn in fact_names){
+  res.aov = aov(rail_data_c2$summed_cost ~ rail_data_c2[, fn])
+  x = summary(res.aov)
+  anova_scores = c(anova_scores, x[[1]][5][1,1])
+  if(x[[1]][5][1,1] < 0.1){
+    cat(fn, ' : ', x[[1]][5][1,1], '\n')
+  }
+}
+barplot(anova_scores, names.arg =  fact_names, las=2, ylab = 'P(>F)', main='Anova Scores for Summed_Cost')
+```
+
+The p-score of Weather Condition improved greatly, though is still not significant, and visibility appears to be the same. Whether someone both the conductor or engineer have worked over 8 hours seems to be insignificant, but is very close.
+
+```{r}
+new_fact = c('Visibility', 'Weather.Condition', 'Working.Over.8', 'Season')
+for(fn in new_fact){
+  barplot(table(rail_data_c2[, fn]), main=fn, las=2)
+}
+```
+
+```{r}
+factor_combos = combn(fact_names, 2)
+warnings = 0
+for(i in 1:dim(factor_combos)[2]){
+  z = chisq.test(rail_data_c2[,factor_combos[1,i]], rail_data_c2[,factor_combos[2,i]])
+  if(z$p.value < 0.1){
+    cat(factor_combos[1,i], ' : ', factor_combos[2,i], ' : ', '\n', z$p.value, '\n')
+    warnings = warnings + 1
+  }
+}
+warnings #79/136. Still alot
+```
+
+```{r}
+cor_df <- round(cor(rail_data_c2[,non_fact_names]), 3)
+#melt the data frame
+melted_cor <- melt(cor_df)
+
+ggplot(data = melted_cor, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red",
+                       limit = c(-1,1), name="Correlation") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.background = element_blank())
+```
+
+#Saving the data
+
+The newly reformed data, with cut-variables and fused categories in the file **cleaned_rail_refined.csv**
+
+```{r}
+write.csv(rail_data_c2, 'C:\\Users\\alden\\Documents\\GRAD_SPRING_2023\\Analytics\\Project\\cleaned_rail_refined.csv', row.names=FALSE)
+```

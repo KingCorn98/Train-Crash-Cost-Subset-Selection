@@ -1,0 +1,395 @@
+---
+title: "Alden_Project_All"
+author: "Alden Jettpace"
+date: '2023-05-02'
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Previously Done:
+
+We already cleaned and refined our data to some effect in the [Alden_Project_Dataclean_examine_2.R] and [Alden_Project_DataExamine.R] files. Now we will do the following:
+
+1) Forward best-subset selection.
+2) Backward best-subset selection.
+3) Lasso coefficient-reduction.
+4) Random Forest.
+
+For the first three methods, if a categorical variable with multiple categories is considered still significant in even just a single cateogry, (ie: if for DayHour it consideres DayHour8 and DayHour16 as relevant, than we consider all of DayHour to be significant)
+
+We will records the variables considered significant in Forwad, Backward, and Lasso. We will then examine these. Then, we will construct a RandomForest. We will then compare the variables selected in the previous three methods to the top 20-most important variables in the RandomForest method.
+
+First, we must consider the exact amount of variables we have after all the categories are considered, to see the maximum allowed for F/B.
+
+```{r}
+rail_data <- read.csv("C:\\Users\\alden\\Documents\\GRAD_SPRING_2023\\Analytics\\Project\\cleaned_rail_refined.csv", 
+                      header=TRUE, stringsAsFactors=TRUE)
+rail_data$DayHour = as.factor(rail_data$DayHour)
+
+#Getting the factors and non-factors
+fact_names = c()
+non_fact_names = c()
+for (i in names(rail_data)){
+  if(class(rail_data[,i]) == 'factor'){
+    fact_names = c(fact_names, i)
+  } else {
+    non_fact_names = c(non_fact_names, i)
+  }
+}
+
+#Get all the subcategories in categorical variables
+fact_vari = 0
+for (i in fact_names){
+  fact_vari = fact_vari + (length(unique(rail_data[,i])) - 1)
+}
+fact_vari + length(non_fact_names)
+```
+
+So technically we have 96 variables in a linear regression off all the variables. Let us quickly consider the R^2, adj R^2 value of a linear-regression trained on all these variables.
+
+```{r}
+full_linear = lm(summed_cost ~ ., data=rail_data)
+full_summary = summary(full_linear)
+full_summary$r.squared
+full_summary$adj.r.squared
+
+#Note: did with an intercept earlier, without saw improved R^2 performance
+```
+
+Overall, all of the variables explain (on training data) 0.4154 or 42% of the variance. By adjustment penalty, its only 0.369 or 37%.
+
+# Expectations:
+
+I believe that we can narrow down the variables which contribute the most to the variability of summed_cost, particularly that this will include the following:
+1)Weather Condition
+2)Positive.DA.Test
+3)Employee.Over.7
+4)Any loaded/empty car attribute
+
+The reasoning being that extreme wheather sould lead to more extreme accidents when they happen thanks to the more slippery conditions, and thus increased costs from the more extreme accidents. High or Drunk employees are also prone to accidents leading to more expensive accidents. Having more rails or weight is more goods that could be damaged and thus more cost when an accident does happen.
+
+Now we move on to subset selection.
+
+# Forward Subset Selection
+
+For Forward/Backward subset selection, we will first use the regsubsets model with a maximum of 96 variables. We will then plot the AIC, BIC, CP, Adj-R^2, and MSE for each model. If the minimal value for AIC/BIC/CP or maximum value for Adj-R^2 differ in number of attributes, then we will instead use cross-validation and select the minimum MSE attribute number
+
+```{r}
+library(leaps)
+regfit.full <- regsubsets(summed_cost ~ ., data = rail_data, nvmax = 96, method = 'forward', really.big = T)
+reg.summary = summary(regfit.full)
+
+plot(reg.summary$rss, xlab = 'Number Variables', ylab = 'RSS', type = 'l')
+
+plot(reg.summary$adjr2, xlab = 'Number Variables', ylab = 'Adjust R^2', type = 'l')
+points(which.max(reg.summary$adjr2), reg.summary$adjr2[which.max(reg.summary$adjr2)], col = 'red')
+
+plot(reg.summary$cp, xlab = 'Number Variables', ylab = 'CP', type = 'l')
+points(which.min(reg.summary$cp), reg.summary$cp[which.min(reg.summary$cp)], col = 'red')
+
+plot(reg.summary$bic, xlab = 'Number Variables', ylab = 'BIC', type = 'l')
+points(which.min(reg.summary$bic), reg.summary$bic[which.min(reg.summary$bic)], col = 'red')
+
+cat('Forward subset-select Max Adj r^2: ', which.max(reg.summary$adjr2), '\n')
+cat('Forward subset-select Min CP: ', which.min(reg.summary$cp), '\n')
+cat('Forward subset-select Min BIC: ', which.min(reg.summary$bic), '\n')
+```
+
+As we can see, the minimum BIC, CP and max Adj-R^2 attribute-number varries, from 15 to 28. Because of this uncertainty, we will instead base our best-number-attributes choice based on cross-validation MSE.
+
+```{r}
+predict.regsubsets <- function(object , newdata , id, ...){
+  form <- as.formula(object$call[[2]])
+  mat <- model.matrix(form, newdata)
+  coefi <- coef(object, id = id)
+  xvars <- names(coefi)
+  mat[, xvars] %*% coefi
+}
+
+k <- 10
+n <- nrow(rail_data)
+set.seed (1)
+folds <- sample ( rep (1:k, length = n))
+cv.errors <- matrix (NA, k, 70, dimnames = list(NULL,paste(1:70)))
+
+for (j in 1:k) {
+  best.fit <- regsubsets(summed_cost ~ ., data = rail_data[folds != j, ], really.big = T,nvmax = 70, method = 'forward')
+  for (i in 1:70) {
+    pred <- predict(best.fit,rail_data[folds == j, ],id = i)
+    cv.errors[j, i] <-mean((rail_data$summed_cost[folds == j] - pred)^2)
+  }
+}
+mean.cv.errors = apply(cv.errors, 2, mean)
+plot(mean.cv.errors)
+points(which.min(mean.cv.errors), mean.cv.errors[which.min(mean.cv.errors)], col = 'red')
+which.min(mean.cv.errors)
+```
+
+We see that for cross-validation, the minimum-error was at 28/96 variables in regsubsets. This has support from being the max-Adj-R^2 in the previous examination, and the minimum CP. Now we will examine the variables within the forward-select at 28.
+
+```{r}
+regfit.fwd = regsubsets(summed_cost~., data = rail_data, nvmax = 96, method = 'forward')
+names(coef(regfit.fwd, 28))
+```
+
+Thus we see the following variables are considered significant: **[DayHour, Visbility, Track.Type, Track.Class, Recorded.Estimated.Speed, Maximum.Speed, Method.of.Operation, Passengers.Transported, Hazmat.Cars, Rear.End.Remote.Locomotives, Loaded.Freight.Cars, Loaded.Passenger.Cars, Empty.Break.Cars, Brakemen.On.Duty, Lat, Long, Joint.Track.Class, Rporting.Railroad.SMT, Positive.DA.Tests]**. Thus a total of **19 variables**. We will now save these for examination later.
+
+```{r}
+forward_names = c('DayHour', 'Visibility', 'Track.Type','Track.Class','Recorded.Estimated.Speed', 'Maximum.Speed','Method.of.Operation',
+                  'Passengers.Transported', 'Hazmat.Cars', 'Rear.End.Remote.Locomotives', 'Loaded.Freight.Cars','Loaded.Passenger.Cars',
+                  'Empty.Freight.Cars','Brakemen.On.Duty','Latitude','Longitude','Joint.Track.Class','Reporting.Railroad.SMT.Grouping',
+                  'Postive.DA.Tests')
+```
+
+# Backward Subset Selection
+
+Now we repeat the process above, but for backward-selection.
+
+```{r}
+regfit.full <- regsubsets(summed_cost ~ ., data = rail_data, nvmax = 96, method = 'backward', really.big = T)
+reg.summary = summary(regfit.full)
+
+plot(reg.summary$rss, xlab = 'Number Variables', ylab = 'RSS', type = 'l')
+
+plot(reg.summary$adjr2, xlab = 'Number Variables', ylab = 'Adjust R^2', type = 'l')
+points(which.max(reg.summary$adjr2), reg.summary$adjr2[which.max(reg.summary$adjr2)], col = 'red')
+
+plot(reg.summary$cp, xlab = 'Number Variables', ylab = 'CP', type = 'l')
+points(which.min(reg.summary$cp), reg.summary$cp[which.min(reg.summary$cp)], col = 'red')
+
+plot(reg.summary$bic, xlab = 'Number Variables', ylab = 'BIC', type = 'l')
+points(which.min(reg.summary$bic), reg.summary$bic[which.min(reg.summary$bic)], col = 'red')
+
+cat('Forward subset-select Max Adj r^2: ', which.max(reg.summary$adjr2), '\n')
+cat('Forward subset-select Min CP: ', which.min(reg.summary$cp), '\n')
+cat('Forward subset-select Min BIC: ', which.min(reg.summary$bic), '\n')
+```
+
+The results of best-attribute-number-selection varies, with a max-Adjusted r^2 at 34-variables, min-CP at 28, min-BIC at 14. Thus the range is 14 to 34 variables. Thus, we will use cross-validation to determine the optimal number of attributes.
+
+```{r}
+k <- 10
+n <- nrow(rail_data)
+set.seed (1)
+folds <- sample ( rep (1:k, length = n))
+cv.errors <- matrix (NA, k, 70, dimnames = list(NULL,paste(1:70)))
+
+
+for (j in 1:k) {
+  best.fit <- regsubsets(summed_cost ~ ., data = rail_data[folds != j, ], really.big = T,nvmax = 70, method = 'backward')
+  for (i in 1:70) {
+    pred <- predict(best.fit,rail_data[folds == j, ],id = i)
+    cv.errors[j, i] <-mean((rail_data$summed_cost[folds == j] - pred)^2)
+  }
+}
+mean.cv.errors = apply(cv.errors, 2, mean)
+plot(mean.cv.errors)
+points(which.min(mean.cv.errors), mean.cv.errors[which.min(mean.cv.errors)], col = 'red')
+which.min(mean.cv.errors)
+```
+
+Differing from Forward-selection, backword selectin finds the best-number of attributes at 22. We will examine the performance of both 22 and 28 to select, by comparing their adj-R2 and RSS.
+
+```{r}
+regfit.bwd = regsubsets(summed_cost~., data = rail_data, nvmax = 96, method = 'backward')
+names(coef(regfit.bwd, 22))
+```
+
+Here, we see that the significant variables are **[DayHour, Visibility, Track.Class, Recorded.Estimated.Speed, Maximum.Speed, Passengers.Transported, Hazmat.Cars, Read.End.Remote.Locomotives, Loaded.Freight.Cars, Loaded.Passenger.Cars, Brakemen.On.Duty, Latitude, Joint.Track.Class, Reporting.Railroad.Smt.Grouping, Positive.DA.Tests, Season]**. We will save these for further use.
+
+```{r}
+backward_names = c('DayHour', 'Visibility','Track.Class','Recorded.Estimated.Speed', 'Maximum.Speed',
+                   'Passengers.Transported', 'Hazmat.Cars', 'Rear.End.Remote.Locomotives', 'Loaded.Freight.Cars',
+                   'Loaded.Passenger.Cars','Brakemen.On.Duty', 'Latitude', 'Joint.Track.Class',
+                   'Reporting.Railroad.SMT.Grouping', 'Postive.DA.Tests', 'Season')
+```
+
+# Lasso Regression Subset Selection
+
+So far, for both subsets, we have reason to believe that the best number of attributes lies between 15-30. We wil now conduct Lasso-subset selection, by conducting Lasso Cross-validation for a series of lambda-values, and select the variables not reduced to 0-coefficient at the best-lambda-value.
+
+```{r}
+library(fastDummies)
+
+df__1 <- rail_data
+
+# One-hot encoding 
+df__encoded <- dummy_cols(df__1, select_columns = fact_names, remove_first_dummy = TRUE)
+
+# Final Dataset
+df__2 <- df__encoded[, !colnames(df__encoded) %in% fact_names]
+```
+
+```{r}
+library(glmnet)
+
+X_1 <- model.matrix(summed_cost ~ ., df__2)[, -1]
+y_1 <- df__2$summed_cost
+
+#Set seed for sampling for cross-validation, same with how it was in other samplings
+set.seed(1)
+
+# perform lasso regression with cross-validation on training data
+cv__fit <- cv.glmnet(X_1, y_1, alpha = 1, nfolds = 10)
+plot(cv__fit)
+ 
+# select the best lambda value
+best__lambda <- cv__fit$lambda.min
+cat('Best lambda value by CV:', best__lambda, '\n')
+cat('Log value of best-lambda by CV:', log(best__lambda), '\n')
+```
+
+```{r}
+lasso__fit <- glmnet(X_1, y_1, alpha = 1, lambda = best__lambda)
+lasso_coefs_1 = predict(lasso__fit, type = "coefficients", s = best__lambda)
+isnt_zero_1 = ifelse(lasso_coefs_1 != 0, T, F)
+sum(isnt_zero_1) 
+rownames(lasso_coefs_1)[isnt_zero_1]
+```
+In lasso-reduction, we see that the remaining variables are **[Train.Speed, Maximum.Speed, Hazmat.Cars, Rear.End.Remote.Locomotives, Loaded.Freight.Cars, Loaded.Passenger.Cars, Empty.Freight.Cars, Cabooses, Brakemen.On.Duty, Latitude, Longitude, DayHour, Visibility, Track.Type, Track.Class, Recorded.Estimated.Speed, Signalization, Method.of.Operation, Passengers.Transported, Joint.Track.Class, Reporting.Railroad.SMT.Grouping, Season]** for a total of **22 Variables**
+
+```{r}
+lasso_names = c('Train.Speed', 'Maximum.Speed', 'Hazmat.Cars', 'Rear.End.Remote.Locomotives', 'Loaded.Freight.Cars', 'Loaded.Passenger.Cars', 'Empty.Freight.Cars', 'Cabooses', 'Brakemen.On.Duty', 'Latitude', 'Longitude', 'DayHour', 'Visibility', 'Track.Type', 'Track.Class', 'Recorded.Estimated.Speed', 'Signalization', 'Method.of.Operation', 'Passengers.Transported', 'Joint.Track.Class', 'Reporting.Railroad.SMT.Grouping', 'Season')
+```
+
+# Random Forest 22-most important Attributes
+
+Now we want to select the best-trained tree paramters of mtry and number trees by way of cross-validation, then using these optimal tuned paramters to see the variables by importance.
+
+```{r}
+library(randomForest)
+
+# cross-validation
+cv_results <- data.frame(ntree = integer(), mtry = integer(), RMSE = numeric())
+k <- 10
+n <- nrow(rail_data)
+set.seed (1)
+folds <- sample ( rep (1:k, length = n))
+
+for (ntree in c(50, 100, 150, 200, 250, 300)) {
+  for (mtry in c(10, 20, 30, 40)) {
+    k_fold_mmse = c()
+    for (j in 1:k){
+      set.seed(1)
+      rf_model <- randomForest(summed_cost ~ ., data = rail_data[folds != j, ], ntree = ntree, mtry = mtry)
+      predictions <- predict(rf_model, rail_data[folds == j, ])
+      mse <- mean((rail_data[folds == j,]$summed_cost - predictions)^2)
+      k_fold_mmse = c(k_fold_mmse, mse)
+    }
+    cv_results <- rbind(cv_results, data.frame(ntree = ntree, mtry = mtry, Mean_MSE = mean(k_fold_mmse)))
+  }
+}
+
+# Tuning hyperparameters
+best_params <- cv_results[which.min(cv_results$Mean_MSE), c("ntree", "mtry")]
+
+print(paste0("Best hyperparameters: ntree = ", best_params[1], 
+             ", mtry = ", best_params[2]))
+```
+
+We have determined the optimal forest contains 100 trees and 10 attributes in each. Now lets use train a forest on these parameters, and find the 21 most important variables.
+
+```{r}
+library(randomForest)
+set.seed(1)
+bagModel = randomForest(summed_cost ~ ., data=rail_data, ntree = 200, mtry = 10,importance = T)
+most_inc = order(importance(bagModel)[,1], decreasing = T)
+top_22_forest = rownames(importance(bagModel)[most_inc[1:22],])
+top_22_forest
+```
+
+So as we can see, the top 22 (matching the lasso) most important attributes in random-forest model on opptimal training parameters is **[Maximum.Speed, Train.Speed, Gross.Tonnage, Loaded.Freight.Cars, Joint.Track.Class, Reporting.Railroad.sMT.Grouping, Latitude, Longitude, Rear.End.Remote.Locomotives, Track.Class, Brakemen.On.Duty, Train.Direction, Reporting.Railroad.Class, Working.Over.8, Loaded.Passenger.Cars, Hazmat.Cars, Track.Density, Year, Recorded.Estimated.Speed, Empty.Freight.Cars, Passengers.Transported, and Signalization]**
+
+# Comparing subsets and best-subset selection
+
+We will now compare the cross-validation of linear-models where the summed_cost is calculated on the variables of the different subsets selected by the previous approaches, as well as unions and intersections of these sets.
+
+```{r}
+forward_names = c('summed_cost', forward_names)
+backward_names = c('summed_cost', backward_names)
+lasso_names = c('summed_cost', lasso_names)
+top_22_forest = c('summed_cost', top_22_forest)
+
+in_any = union(union(forward_names, backward_names), union(lasso_names, top_22_forest))
+in_all = intersect(intersect(forward_names, backward_names), intersect(lasso_names, top_22_forest))
+```
+
+```{r}
+#Will have to remove several levels from rail data before continuing.
+#Cannot use cv.glm as have no way to get and average the metric of adjusted.R.Squared
+#Note: must in this case remove the very small value in rail_data[Track.Class] in case of emergency.
+
+#Note: cannot use track-class and joint-track-class together (perfectly the)
+#Note: reprocess data
+rail_data_rm = rail_data[rail_data$Joint.Track.Class %in% c('1','2','3','4','5'),]
+rail_data_rm = rail_data_rm[rail_data_rm$Track.Class %in% c('1','2','3','4','5'),]
+rail_data_rm$Joint.Track.Class = droplevels(rail_data_rm$Joint.Track.Class)
+rail_data_rm$Track.Class = droplevels(rail_data_rm$Track.Class)
+
+
+
+#Do cv on same seed for each, then do adj_r2 for each on lm
+all_subsets = list(forward_names, backward_names, lasso_names, top_22_forest, in_any, in_all, names(rail_data))
+results_mat = data.frame(mean_err=numeric(0), lm_r2 = numeric(0), lm_adj_r2 = numeric(0))
+for (i in 1:length(all_subsets)){
+  set.seed(1)
+  glm.temp = glm(summed_cost ~ ., data = rail_data_rm[, all_subsets[[i]]])
+  lm.temp = lm(summed_cost ~ ., data = rail_data_rm[,all_subsets[[i]]])
+  
+  cv.err.10 <- cv.glm(rail_data_rm[,all_subsets[[i]]], glm.temp, K = 10)$delta[1]
+  
+  results_mat[i,] = c(cv.err.10, summary(lm.temp)$r.squared, summary(lm.temp)$adj.r.squared)
+}
+
+row.names(results_mat) = c('Forward_Subset', 'Backward_Subset', 'Lasso_subset', 'RF_Subset', 'In_Any', 'In_All', 'All_Variables')
+results_mat
+results_mat[which.min(results_mat$mean_err),]
+results_mat[which.max(results_mat$lm_adj_r2),]
+```
+
+Overall, we see that for our two-metrics: Cross-validation error and adjusted R2-score, we find that the attributes that appear in all the variables has the lowest cross-validation-error, while the backward-selected attributes have the highest adjusted R2 score, though all are similar. While the adjusted R2 value of both of these subsets is not much better than that of the entire-data set, nor is mean_err all that much worse because of effect of large-values of prediction, we do see that the 12 variables found within all the selection methods contained 38% of the variance, while the additional 4 variables for the backward select method only had an additional 2% explained variance. While the Adj-r2 value improves slightly, it suggests that while these variables are relevant, their actually effect is still very small.
+
+Overall, with the goal of reducing the subset of variables to the most relevant for predicting the total cost of a crash, then those found in all the variables: **[Track.Class, Recorded.Estimated.Speed, Maximum.Speed, Passengers.Transported, Hazmat.cars, Rear.End.Remote.Locomotives, Loaded.Freight.Cars, Loaded.Passenger.Cars, Brakemen.On.Duty, Latitute, Joint.Track.Class, Reporting.Railroad.SMT.Grouping]**
+
+# Seeing coefficients of best-subset and explantion
+
+```{r}
+best_mod = lm(summed_cost ~ ., data=rail_data[,in_all])
+summary(best_mod)
+```
+
+Explanation of Coefficients:
+
+--Because the cost is composed of track-cost, certain types or classes of track could be more expensive when damaged while at the same time harder to damage given the circumstances. As such, their class would determine the cost
+
+--If the train speed was able to be recorded, it might be that a team is aware of just how highly expensive their cargo is and so is keeping track of their speed at all times, rather than simply estimating it after the fact. Thus, this is not an indicator of possible costs, but rather a result of already having a good idea of possible costs.
+
+--The faster a train goes, the more dangerous a crash or accident could be and thus could cause a more costly accident such as a full derailment or collision. As such, it has positive correlation with the cost of accident. However, it could also be that their is a rush to move more exspensive loads for maximum revenues, and this in turn leads to far more expensive accidents.
+
+--If passengers are transported, since insurance damage has not been covered in this case, then their is less room for equipment which could be damaged in the accident. Thus it has a relevent negative-correlation with cost
+
+--Hazmat.Cars are highly expensive equipment. While the cost of toxic cleanup has not been included in the equation, it stands to reason that hazmat.cars are expensive enough on their own to still be highly correlated with raw equipment and track-damage cost. Could also be that the material corrods the tracks and adds to damages that way.
+
+--Rear.End.Remote.Locomotives are also highly expensive pieces of equipment. As such, an accident with them could prove to be highly expensive. However, it could also be that glitches occur with the system such that in the cases where they do fail, they cause an already bad accident to become worse and cause derailment or another accident that could add to the costs.
+
+--How loaded a car is determines how much damages are paid. So it makes sense that the number of loaded freight and passanger cars have positive correlation with the costs. However, it is strange that the coefficient for passenger cars is heigher than freight-cars, despite human-damages not being considered in the equation. It could be that the added weight of the passenger cars somehow causes more severe accidents? Hard to tell.
+
+--Latitude (an assumed longitude though for some reason not considered) could have to due with the quality of rail in the north vs the south of the united states. As one goes north, latitude increases so having negative coefficient means that their are less costs to damages in the north. This could be because of many factors: quality of rail/infrasturcutre (the southern united states had much fewer rails than the north), insurance and damage laws between the states, funding, or rail-density.
+
+--Joint.Track.Class is highly correlated with Track.Class, and has same reasons.
+
+--The Safety Management Teams (SMT) serve as the Office of Railroad Safety's main liaison with the senior leadership of the Nation's railroads. Each of the nine Safety Management Teams is assigned to either a Class I railroad or a group of railroads and provides safety oversight of the respective railroad system(s). So, having positive/negative correlation (differs by SMT) means that those teams might be more or less negligent, leading to far more expensive accidents in their regions. If could also be that they are more safe, so it leads to trains loading up more equipment so in the few times their is an accident then their is so much equipment that the costs are severe in the few incidents.
+
+Overall, we find that the best way to guess the cost of the damages in how expensive and numerous the equipment is on the train, the track type they are currently on, how carefully/not carefully they are managing the train, whether they are driving in a northern or southern state, and who their safety-management team is.
+
+# Possible expansion
+
+Ultimately, we accident cost as a measure of making accidents more likely to be severe, which might not have been the best approach. In the future, we might try to base our judgement on whether a train derailed/crashed compared to a less severe accident or random accident. THen we could find variables less directly correlated with the value in question (as the amount and type of cars and track will be highly correalted with the damage costs, which is self evident to any engineer, brakemen, or driver).
+
+The main problem is the lack of data leading to severe threat of subset-noise intefering with the true-shape of the data. While could in some circumstance replace missing values with mean/mode values depending on if they are countinous or categorical, their was simply too much missing in this situation for that to be viable. Having cleaner data, and having better data standards for the Department of Transportation would help.
+
+
+
